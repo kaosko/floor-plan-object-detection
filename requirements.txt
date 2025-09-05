@@ -10,9 +10,11 @@ scipy>=1.9.0
 scikit-learn>=1.1.0
 scikit-image>=0.19.0
 matplotlib>=3.5.0
+plotly>=5.10.0
 pytesseract>=0.3.10
 ezdxf>=1.0.0
 streamlit-drawable-canvas>=0.9.0
+PyMuPDF>=1.24.0
 
 # CPU-only computer vision stack
 opencv-python-headless>=4.8.0
