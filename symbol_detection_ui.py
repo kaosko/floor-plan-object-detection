@@ -134,12 +134,16 @@ def handle_template_update(component_value):
             template = component_value.get('template')
             if template and template.get('type') == 'rectangle':
                 # Set ROI from template
-                st.session_state.config['roi'] = (
+                roi = (
                     int(template['x']), int(template['y']),
                     int(template['width']), int(template['height'])
                 )
+                st.session_state.config['roi'] = roi
                 st.session_state.roi_selected = True
+                
+                # Debug: Show what was set
                 st.success(f"✅ Template T{template['id']} applied as ROI!")
+                st.info(f"🔧 ROI set to: ({roi[0]}, {roi[1]}) - {roi[2]}×{roi[3]}px")
                 st.rerun()
 
 def render_interactive_roi_selection():
@@ -532,9 +536,16 @@ def render_interactive_roi_selection():
         
         function useSelectedTemplate() {{
             if (selectedTemplate) {{
+                // Ensure coordinates are integers for proper ROI transfer
                 const templateData = {{
                     action: 'use_template',
-                    template: selectedTemplate
+                    template: {{
+                        ...selectedTemplate,
+                        x: Math.round(selectedTemplate.x),
+                        y: Math.round(selectedTemplate.y),
+                        width: Math.round(selectedTemplate.width),
+                        height: Math.round(selectedTemplate.height)
+                    }}
                 }};
                 
                 window.parent.postMessage({{
@@ -827,9 +838,18 @@ def render_roi_selection_tab():
         return
     
     # Show current ROI if selected
-    if st.session_state.roi_selected:
+    if st.session_state.roi_selected and st.session_state.config.get('roi'):
         roi = st.session_state.config['roi']
         st.info(f"✅ Current Template ROI: ({roi[0]}, {roi[1]}) - {roi[2]}×{roi[3]} px")
+    
+    # Debug information (can be removed later)
+    with st.expander("🔧 Debug Info"):
+        st.write(f"**roi_selected**: {st.session_state.roi_selected}")
+        st.write(f"**config.roi**: {st.session_state.config.get('roi')}")
+        st.write(f"**annotations count**: {len(st.session_state.annotations)}")
+        if st.session_state.annotations:
+            st.write("**Last annotation**:")
+            st.json(st.session_state.annotations[-1])
     
     st.markdown("""
     **Instructions:**
@@ -842,9 +862,24 @@ def render_roi_selection_tab():
     # Native annotation interface
     render_interactive_roi_selection()
     
-    # Show current templates
+    # Show current templates and ROI status
     if st.session_state.annotations:
         st.subheader("📋 Created Templates")
+        
+        # Check if current ROI matches any template
+        current_roi = st.session_state.config.get('roi')
+        current_roi_template = None
+        if current_roi:
+            for template in st.session_state.annotations:
+                if template.get('type') == 'rectangle':
+                    # Check if template matches current ROI (with some tolerance)
+                    if (abs(template['x'] - current_roi[0]) < 1 and 
+                        abs(template['y'] - current_roi[1]) < 1 and
+                        abs(template['width'] - current_roi[2]) < 1 and
+                        abs(template['height'] - current_roi[3]) < 1):
+                        current_roi_template = template
+                        break
+        
         for template in st.session_state.annotations:
             if template.get('type') == 'rectangle':
                 area = template['width'] * template['height']
@@ -854,8 +889,12 @@ def render_roi_selection_tab():
                     quality = "⚠️ Large" 
                 else:
                     quality = "✅ Good"
+                
+                # Mark if this template is currently used as ROI
+                roi_indicator = " 🎯 **ACTIVE ROI**" if template == current_roi_template else ""
+                
                 st.write(f"**T{template['id']}**: {template['label']} - "
-                       f"({template['x']:.0f}, {template['y']:.0f}) {template['width']:.0f}×{template['height']:.0f}px - {quality}")
+                       f"({template['x']:.0f}, {template['y']:.0f}) {template['width']:.0f}×{template['height']:.0f}px - {quality}{roi_indicator}")
     
     st.markdown("---")
     
@@ -882,10 +921,42 @@ def render_detection_tab():
     """Render detection tab"""
     st.header("🔍 Symbol Detection")
     
-    if not st.session_state.roi_selected:
-        st.warning("⚠️ Please select ROI first")
+    # Show detection configuration
+    st.subheader("🔧 Detection Configuration")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Symbol Type", st.session_state.config['class_name'])
+    with col2:
+        st.metric("Threshold", f"{st.session_state.config['threshold']:.2f}")
+    with col3:
+        if st.session_state.roi_selected and st.session_state.config['roi']:
+            roi = st.session_state.config['roi']
+            st.metric("ROI Size", f"{roi[2]}×{roi[3]}px")
+        else:
+            st.metric("ROI Size", "Not set")
+    
+    # Show ROI status
+    if st.session_state.roi_selected and st.session_state.config['roi']:
+        roi = st.session_state.config['roi']
+        st.success(f"✅ **ROI Ready**: ({roi[0]}, {roi[1]}) - {roi[2]}×{roi[3]} pixels")
+        
+        # Show template info if available
+        if st.session_state.annotations:
+            active_templates = [t for t in st.session_state.annotations if t.get('type') == 'rectangle']
+            if active_templates:
+                st.info(f"📋 **Templates Created**: {len(active_templates)} templates available for selection")
+    else:
+        st.warning("⚠️ **No ROI Selected** - Please go to 'Template Selection' tab and:")
+        st.markdown("""
+        1. 🖱️ Select the rectangle tool
+        2. 🎯 Draw a rectangle around your target symbol
+        3. ✅ Click "Use Selected" to apply it as ROI
+        """)
         return
     
+    # Detection controls
+    st.subheader("🚀 Run Detection")
     col1, col2 = st.columns(2)
     
     with col1:
@@ -903,9 +974,21 @@ def render_detection_tab():
                     st.error(f"❌ Detection failed: {message}")
     
     with col2:
+        # Show additional ROI details
         if st.session_state.roi_selected:
             roi = st.session_state.config['roi']
-            st.info(f"ROI: {roi[0]},{roi[1]} - {roi[2]}x{roi[3]}")
+            st.write("**ROI Details:**")
+            st.write(f"• **Position**: ({roi[0]}, {roi[1]})")
+            st.write(f"• **Size**: {roi[2]} × {roi[3]} pixels")
+            st.write(f"• **Area**: {roi[2] * roi[3]:,} pixels²")
+            
+            # Debug information
+            with st.expander("🔧 Debug Info"):
+                st.write(f"**roi_selected**: {st.session_state.roi_selected}")
+                st.write(f"**config.roi**: {st.session_state.config.get('roi')}")
+                st.write(f"**annotations count**: {len(st.session_state.annotations)}")
+                st.write("**Full config.roi**:")
+                st.json(st.session_state.config.get('roi'))
 
 def render_results_tab():
     """Render results tab"""
