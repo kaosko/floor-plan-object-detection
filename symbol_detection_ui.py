@@ -17,7 +17,8 @@ import time
 import subprocess
 import sys
 import fitz  # PyMuPDF for PDF processing
-from streamlit_drawable_canvas import st_canvas
+import base64
+import streamlit.components.v1 as components
 
 # Set page config
 st.set_page_config(
@@ -56,8 +57,8 @@ def initialize_session_state():
         st.session_state.detection_results = None
     if 'current_image' not in st.session_state:
         st.session_state.current_image = None
-    if 'roi_zoom_level' not in st.session_state:
-        st.session_state.roi_zoom_level = 1.0
+    if 'annotations' not in st.session_state:
+        st.session_state.annotations = []
     if 'config' not in st.session_state:
         st.session_state.config = {
             'pdf_path': '',
@@ -111,12 +112,42 @@ def render_pdf_to_image(pdf_path: str, page_num: int, zoom: float):
     except Exception as e:
         return False, str(e)
 
+def image_to_base64(cv_image):
+    """Convert OpenCV image to base64 string."""
+    # Convert BGR to RGB
+    rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+    # Convert to PIL Image
+    pil_image = Image.fromarray(rgb_image)
+    # Convert to base64
+    import io
+    buffered = io.BytesIO()
+    pil_image.save(buffered, format="JPEG", quality=85)
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return img_str
+
+def handle_template_update(component_value):
+    """Handle updates from the template annotation interface."""
+    if isinstance(component_value, dict):
+        if component_value.get('action') == 'update_templates':
+            st.session_state.annotations = component_value.get('templates', [])
+        elif component_value.get('action') == 'use_template':
+            template = component_value.get('template')
+            if template and template.get('type') == 'rectangle':
+                # Set ROI from template
+                st.session_state.config['roi'] = (
+                    int(template['x']), int(template['y']),
+                    int(template['width']), int(template['height'])
+                )
+                st.session_state.roi_selected = True
+                st.success(f"✅ Template T{template['id']} applied as ROI!")
+                st.rerun()
+
 def render_interactive_roi_selection():
-    """Interactive ROI selection using drawable canvas - Fixed Version"""
-    st.subheader("🖱️ Interactive ROI Selection")
+    """Native HTML/JS annotation interface for symbol templates."""
+    st.subheader("🖱️ Native Template Selection Interface")
     
     if st.session_state.current_image is None:
-        st.warning("⚠️ No rendered PDF image available for ROI selection")
+        st.warning("⚠️ No rendered PDF image available for template selection")
         
         # Offer to render the PDF automatically
         if st.session_state.pdf_loaded:
@@ -142,220 +173,476 @@ def render_interactive_roi_selection():
             st.error("📄 Please upload a PDF file first using the sidebar")
         return
     
-    # Add zoom controls
-    st.markdown("### 🔍 Zoom Controls")
+    # Convert image to base64 for embedding
+    image_base64 = image_to_base64(st.session_state.current_image)
     
-    col1, col2, col3, col4 = st.columns(4)
+    # Get current annotations from session state
+    annotations_json = json.dumps(st.session_state.annotations)
     
-    with col1:
-        if st.button("🔍➕ Zoom In"):
-            st.session_state.roi_zoom_level = min(st.session_state.roi_zoom_level * 1.5, 3.0)
-            st.rerun()
-    
-    with col2:
-        if st.button("🔍➖ Zoom Out"):
-            st.session_state.roi_zoom_level = max(st.session_state.roi_zoom_level / 1.5, 0.5)
-            st.rerun()
-    
-    with col3:
-        if st.button("🔄 Reset Zoom"):
-            st.session_state.roi_zoom_level = 1.0
-            st.rerun()
-    
-    with col4:
-        st.write(f"Zoom: {st.session_state.roi_zoom_level:.1f}x")
-    
-    # Zoom slider for precise control
-    zoom_slider = st.slider(
-        "Fine Zoom Control", 
-        min_value=0.5, 
-        max_value=3.0, 
-        value=st.session_state.roi_zoom_level, 
-        step=0.1,
-        key="roi_zoom_slider"
-    )
-    
-    if abs(zoom_slider - st.session_state.roi_zoom_level) > 0.01:
-        st.session_state.roi_zoom_level = zoom_slider
-        st.rerun()
-    
-    # Convert image to RGB for display
-    display_image = cv2.cvtColor(st.session_state.current_image, cv2.COLOR_BGR2RGB)
-    img_pil = Image.fromarray(display_image)
-    
-    # Calculate display size with zoom
-    h, w = display_image.shape[:2]
-    max_canvas_width = 800
-    max_canvas_height = 600
-    
-    # Apply zoom to the base scale calculation
-    zoom_level = st.session_state.roi_zoom_level
-    
-    # Calculate base display size
-    if w > max_canvas_width or h > max_canvas_height:
-        base_scale_w = max_canvas_width / w
-        base_scale_h = max_canvas_height / h
-        base_scale = min(base_scale_w, base_scale_h)
-    else:
-        base_scale = 1.0
-    
-    # Apply zoom to the base scale
-    effective_scale = base_scale * zoom_level
-    
-    # Calculate final display dimensions
-    display_width = int(w * effective_scale)
-    display_height = int(h * effective_scale)
-    
-    # Limit canvas size to max dimensions
-    canvas_width = min(display_width, max_canvas_width)
-    canvas_height = min(display_height, max_canvas_height)
-    
-    # Resize image for display
-    img_pil_resized = img_pil.resize((display_width, display_height), Image.Resampling.LANCZOS)
-    
-    # If image is larger than canvas, crop to center
-    if display_width > max_canvas_width or display_height > max_canvas_height:
-        # Calculate crop area to center the image
-        crop_x = max(0, (display_width - canvas_width) // 2)
-        crop_y = max(0, (display_height - canvas_height) // 2)
-        img_pil_resized = img_pil_resized.crop((
-            crop_x, 
-            crop_y, 
-            crop_x + canvas_width, 
-            crop_y + canvas_height
-        ))
-        # Store crop offset for coordinate conversion
-        crop_offset = (crop_x, crop_y)
-    else:
-        crop_offset = (0, 0)
-    
-    # Drawing canvas
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 0, 0, 0.1)",  # Semi-transparent red fill
-        stroke_width=2,
-        stroke_color="#FF0000",  # Red stroke
-        background_image=img_pil_resized,
-        update_streamlit=True,
-        width=canvas_width,
-        height=canvas_height,
-        drawing_mode="rect",  # Rectangle drawing mode
-        point_display_radius=0,
-        key="roi_canvas_symbol_zoom",
-    )
-    
-    # Process canvas data
-    if canvas_result.json_data is not None:
-        objects = canvas_result.json_data["objects"]
-        
-        if objects:
-            # Get the last drawn rectangle
-            last_rect = objects[-1]
+    html_content = f"""
+    <div id="symbol-annotation-container" style="width: 100%; height: 600px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
+        <div style="display: grid; grid-template-rows: 50px 1fr 120px; height: 100%;">
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; display: flex; align-items: center; justify-content: space-between; padding: 0 15px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 20px;">🔍</span>
+                    <span style="font-size: 14px; font-weight: 600;">Symbol Template Selection</span>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button id="saveTemplateBtn" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); color: white; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;">Save Template</button>
+                    <button id="clearBtn" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); color: white; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;">Clear</button>
+                </div>
+            </div>
             
-            if last_rect["type"] == "rect":
-                # Extract rectangle coordinates (in canvas coordinates)
-                canvas_x = int(last_rect["left"])
-                canvas_y = int(last_rect["top"]) 
-                canvas_width_rect = int(last_rect["width"])
-                canvas_height_rect = int(last_rect["height"])
+            <!-- Main Content -->
+            <div style="display: grid; grid-template-columns: 150px 1fr; height: 100%;">
+                <!-- Sidebar -->
+                <div style="background: #f8f9fa; border-right: 1px solid #ddd; padding: 10px; overflow-y: auto;">
+                    <div style="font-size: 12px; font-weight: 600; color: #333; margin-bottom: 8px;">TOOLS</div>
+                    <button class="tool-btn active" data-tool="select" style="display: block; width: 100%; padding: 6px; margin-bottom: 4px; background: #007bff; color: white; border: 1px solid #0056b3; border-radius: 4px; cursor: pointer; font-size: 11px;">↖ Select</button>
+                    <button class="tool-btn" data-tool="rectangle" style="display: block; width: 100%; padding: 6px; margin-bottom: 4px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; font-size: 11px;">⬜ Rectangle</button>
+                    <div style="margin-top: 15px;">
+                        <div style="font-size: 12px; font-weight: 600; color: #333; margin-bottom: 8px;">VIEW</div>
+                        <button id="zoomInBtn" style="display: block; width: 100%; padding: 6px; margin-bottom: 4px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; font-size: 11px;">🔍 Zoom In</button>
+                        <button id="zoomOutBtn" style="display: block; width: 100%; padding: 6px; margin-bottom: 4px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; font-size: 11px;">🔍 Zoom Out</button>
+                        <button id="fitBtn" style="display: block; width: 100%; padding: 6px; margin-bottom: 4px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; font-size: 11px;">📐 Fit</button>
+                    </div>
+                </div>
                 
-                # Convert from canvas coordinates to original image coordinates
-                # Step 1: Add crop offset to get coordinates in the full scaled image
-                scaled_x = canvas_x + crop_offset[0]
-                scaled_y = canvas_y + crop_offset[1]
+                <!-- Canvas -->
+                <div style="position: relative; overflow: hidden; background: #fff;">
+                    <canvas id="symbolCanvas" style="position: absolute; top: 0; left: 0; cursor: crosshair;"></canvas>
+                    <div id="symbolStatusBar" style="position: absolute; bottom: 5px; left: 5px; background: rgba(0,0,0,0.7); color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px;">
+                        Ready | Tool: Select | Templates: 0
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Bottom Panel -->
+            <div style="background: #fff; border-top: 1px solid #ddd; padding: 8px; overflow-y: auto;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-size: 12px; font-weight: 600; color: #333;">TEMPLATE MANAGER</span>
+                    <div>
+                        <button id="useTemplateBtn" style="background: #28a745; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 10px; margin-right: 4px;">Use Selected</button>
+                        <button id="deleteTemplateBtn" style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 10px;">Delete</button>
+                    </div>
+                </div>
+                <div id="templateList" style="font-size: 11px;">
+                    <div style="color: #666;">No templates created yet. Draw rectangles around target symbols to create templates.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {{
+        // Symbol template annotation interface
+        let canvas, ctx;
+        let currentTool = 'select';
+        let isDrawing = false;
+        let zoom = 1.0;
+        let panX = 0, panY = 0;
+        let templates = {annotations_json};
+        let selectedTemplate = null;
+        let nextId = 1;
+        let backgroundImage = null;
+        let startX, startY;
+        
+        function init() {{
+            canvas = document.getElementById('symbolCanvas');
+            if (!canvas) return;
+            
+            ctx = canvas.getContext('2d');
+            
+            // Load background image
+            const img = new Image();
+            img.onload = function() {{
+                backgroundImage = img;
+                resizeCanvas();
+                redraw();
+            }};
+            img.src = 'data:image/jpeg;base64,{image_base64}';
+            
+            // Bind events
+            bindEvents();
+            updateStatus();
+            updateTemplateList();
+        }}
+        
+        function resizeCanvas() {{
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            
+            if (backgroundImage) {{
+                // Fit image to canvas
+                const scaleX = canvas.width / backgroundImage.width;
+                const scaleY = canvas.height / backgroundImage.height;
+                zoom = Math.min(scaleX, scaleY) * 0.8;
+                panX = (canvas.width - backgroundImage.width * zoom) / 2;
+                panY = (canvas.height - backgroundImage.height * zoom) / 2;
+            }}
+            
+            redraw();
+        }}
+        
+        function bindEvents() {{
+            // Canvas events
+            canvas.addEventListener('mousedown', handleMouseDown);
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseup', handleMouseUp);
+            canvas.addEventListener('wheel', handleWheel);
+            
+            // Tool buttons
+            document.querySelectorAll('.tool-btn').forEach(btn => {{
+                btn.addEventListener('click', () => selectTool(btn.dataset.tool));
+            }});
+            
+            // Action buttons
+            document.getElementById('zoomInBtn').addEventListener('click', () => zoomBy(1.2));
+            document.getElementById('zoomOutBtn').addEventListener('click', () => zoomBy(0.8));
+            document.getElementById('fitBtn').addEventListener('click', fitToView);
+            document.getElementById('saveTemplateBtn').addEventListener('click', saveTemplate);
+            document.getElementById('clearBtn').addEventListener('click', clearTemplates);
+            document.getElementById('useTemplateBtn').addEventListener('click', useSelectedTemplate);
+            document.getElementById('deleteTemplateBtn').addEventListener('click', deleteSelectedTemplate);
+            
+            // Window resize
+            window.addEventListener('resize', resizeCanvas);
+        }}
+        
+        function selectTool(tool) {{
+            currentTool = tool;
+            
+            // Update UI
+            document.querySelectorAll('.tool-btn').forEach(btn => {{
+                btn.style.background = btn.dataset.tool === tool ? '#007bff' : '#f8f9fa';
+                btn.style.color = btn.dataset.tool === tool ? 'white' : 'black';
+            }});
+            
+            canvas.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+            updateStatus();
+        }}
+        
+        function handleMouseDown(e) {{
+            const rect = canvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left - panX) / zoom;
+            const y = (e.clientY - rect.top - panY) / zoom;
+            
+            startX = x;
+            startY = y;
+            
+            if (currentTool === 'rectangle') {{
+                isDrawing = true;
+            }} else if (currentTool === 'select') {{
+                selectedTemplate = getTemplateAt(x, y);
+                updateTemplateList();
+                redraw();
+            }}
+        }}
+        
+        function handleMouseMove(e) {{
+            if (!isDrawing) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left - panX) / zoom;
+            const y = (e.clientY - rect.top - panY) / zoom;
+            
+            if (currentTool === 'rectangle') {{
+                redraw();
+                drawPreviewRect(startX, startY, x - startX, y - startY);
+            }}
+        }}
+        
+        function handleMouseUp(e) {{
+            if (!isDrawing) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left - panX) / zoom;
+            const y = (e.clientY - rect.top - panY) / zoom;
+            
+            if (currentTool === 'rectangle') {{
+                const width = x - startX;
+                const height = y - startY;
                 
-                # Step 2: Convert from scaled coordinates to original image coordinates
-                roi_x = int(scaled_x / effective_scale)
-                roi_y = int(scaled_y / effective_scale)
-                roi_width = int(canvas_width_rect / effective_scale)
-                roi_height = int(canvas_height_rect / effective_scale)
+                if (Math.abs(width) > 10 && Math.abs(height) > 10) {{
+                    createTemplate(
+                        Math.min(startX, x),
+                        Math.min(startY, y),
+                        Math.abs(width),
+                        Math.abs(height)
+                    );
+                }}
+            }}
+            
+            isDrawing = false;
+        }}
+        
+        function handleWheel(e) {{
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+            const newZoom = Math.max(0.1, Math.min(5, zoom * zoomFactor));
+            
+            panX = x - (x - panX) * (newZoom / zoom);
+            panY = y - (y - panY) * (newZoom / zoom);
+            
+            zoom = newZoom;
+            redraw();
+        }}
+        
+        function redraw() {{
+            if (!ctx || !canvas) return;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.save();
+            ctx.translate(panX, panY);
+            ctx.scale(zoom, zoom);
+            
+            // Draw background image
+            if (backgroundImage) {{
+                ctx.drawImage(backgroundImage, 0, 0);
+            }}
+            
+            // Draw templates
+            templates.forEach(template => {{
+                if (!template.visible) return;
                 
-                # Ensure coordinates are within image bounds
-                roi_x = max(0, min(roi_x, w - 1))
-                roi_y = max(0, min(roi_y, h - 1))
-                roi_width = max(10, min(roi_width, w - roi_x))
-                roi_height = max(10, min(roi_height, h - roi_y))
+                ctx.save();
+                ctx.strokeStyle = template === selectedTemplate ? '#ff0000' : '#00ff00';
+                ctx.lineWidth = 2;
+                ctx.fillStyle = 'rgba(0, 255, 0, 0.1)';
                 
-                # Show selected ROI info
-                st.info(f"Selected ROI: ({roi_x}, {roi_y}) - {roi_width}×{roi_height} px")
+                ctx.fillRect(template.x, template.y, template.width, template.height);
+                ctx.strokeRect(template.x, template.y, template.width, template.height);
                 
-                # Show ROI crop preview
-                roi_crop = st.session_state.current_image[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width]
-                if roi_crop.size > 0:
-                    roi_rgb = cv2.cvtColor(roi_crop, cv2.COLOR_BGR2RGB)
-                    
-                    col1, col2 = st.columns([1, 2])
-                    with col1:
-                        st.image(roi_rgb, caption="Selected ROI Template", width=200)
-                    
-                    with col2:
-                        st.write("**Template Quality Analysis:**")
-                        
-                        # Basic quality metrics
-                        gray_roi = cv2.cvtColor(roi_crop, cv2.COLOR_BGR2GRAY)
-                        
-                        # Calculate some basic metrics
-                        mean_intensity = np.mean(gray_roi)
-                        std_intensity = np.std(gray_roi)
-                        
-                        # Edge density
-                        edges = cv2.Canny(gray_roi, 50, 150)
-                        edge_density = np.sum(edges > 0) / edges.size
-                        
-                        st.write(f"• Size: {roi_width}×{roi_height} pixels")
-                        st.write(f"• Mean intensity: {mean_intensity:.1f}")
-                        st.write(f"• Intensity variation: {std_intensity:.1f}")
-                        st.write(f"• Edge density: {edge_density:.3f}")
-                        
-                        # Quality assessment
-                        quality_messages = []
-                        
-                        if roi_width >= 20 and roi_height >= 20:
-                            quality_messages.append("✅ Good size")
-                        else:
-                            quality_messages.append("⚠️ Template might be too small")
-                        
-                        if std_intensity > 20:
-                            quality_messages.append("✅ Good contrast")
-                        else:
-                            quality_messages.append("⚠️ Low contrast")
-                        
-                        if edge_density > 0.1:
-                            quality_messages.append("✅ Rich in edges")
-                        else:
-                            quality_messages.append("⚠️ Few edges detected")
-                        
-                        for msg in quality_messages:
-                            st.write(f"  {msg}")
+                // Draw ID
+                ctx.fillStyle = '#000';
+                ctx.font = '12px Arial';
+                ctx.fillText(`T${{template.id}}`, template.x + 5, template.y + 15);
                 
-                # Apply ROI button
-                if st.button("🎯 Use This ROI for Detection", type="primary"):
-                    st.session_state.config['roi'] = (roi_x, roi_y, roi_width, roi_height)
-                    st.session_state.roi_selected = True
-                    st.success(f"✅ ROI applied: ({roi_x}, {roi_y}, {roi_width}, {roi_height})")
-                    st.rerun()
-        else:
-            st.info("👆 Draw a rectangle around your target symbol to select ROI")
+                ctx.restore();
+            }});
+            
+            ctx.restore();
+        }}
+        
+        function drawPreviewRect(x, y, w, h) {{
+            ctx.save();
+            ctx.translate(panX, panY);
+            ctx.scale(zoom, zoom);
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.strokeRect(x, y, w, h);
+            ctx.restore();
+        }}
+        
+        function createTemplate(x, y, width, height) {{
+            const template = {{
+                id: nextId++,
+                type: 'rectangle',
+                label: `Template ${{nextId - 1}}`,
+                x: x,
+                y: y,
+                width: width,
+                height: height,
+                visible: true,
+                color: '#00ff00'
+            }};
+            
+            templates.push(template);
+            redraw();
+            updateTemplateList();
+            updateStatus();
+            sendToStreamlit();
+        }}
+        
+        function getTemplateAt(x, y) {{
+            for (let i = templates.length - 1; i >= 0; i--) {{
+                const template = templates[i];
+                if (!template.visible) continue;
+                
+                if (x >= template.x && x <= template.x + template.width &&
+                    y >= template.y && y <= template.y + template.height) {{
+                    return template;
+                }}
+            }}
+            return null;
+        }}
+        
+        function updateStatus() {{
+            const statusBar = document.getElementById('symbolStatusBar');
+            const toolName = currentTool.charAt(0).toUpperCase() + currentTool.slice(1);
+            statusBar.textContent = `Ready | Tool: ${{toolName}} | Templates: ${{templates.length}}`;
+        }}
+        
+        function updateTemplateList() {{
+            const templateList = document.getElementById('templateList');
+            
+            if (templates.length === 0) {{
+                templateList.innerHTML = '<div style="color: #666;">No templates created yet. Draw rectangles around target symbols to create templates.</div>';
+                return;
+            }}
+            
+            let html = '';
+            templates.forEach(template => {{
+                const isSelected = template === selectedTemplate;
+                const bgColor = isSelected ? '#e3f2fd' : 'transparent';
+                const quality = analyzeTemplateQuality(template);
+                html += `
+                    <div style="display: flex; align-items: center; padding: 4px; background: ${{bgColor}}; border-radius: 4px; margin-bottom: 2px; cursor: pointer;" onclick="selectTemplate(${{template.id}})">
+                        <span style="min-width: 30px; font-weight: 500;">T${{template.id}}</span>
+                        <span style="flex: 1; margin-left: 8px;">${{template.label}} (${{template.width}}×${{template.height}}px)</span>
+                        <span style="font-size: 9px; color: ${{quality.color}}; margin-left: 4px;">${{quality.text}}</span>
+                        <button onclick="event.stopPropagation(); toggleTemplateVisibility(${{template.id}})" style="background: none; border: none; cursor: pointer; font-size: 12px; margin-left: 4px;">${{template.visible ? '👁' : '🚫'}}</button>
+                    </div>
+                `;
+            }});
+            
+            templateList.innerHTML = html;
+        }}
+        
+        function analyzeTemplateQuality(template) {{
+            const area = template.width * template.height;
+            if (area < 400) return {{color: '#dc3545', text: 'Small'}};
+            if (area > 40000) return {{color: '#ffc107', text: 'Large'}};
+            return {{color: '#28a745', text: 'Good'}};
+        }}
+        
+        function selectTemplate(id) {{
+            selectedTemplate = templates.find(t => t.id === id) || null;
+            redraw();
+            updateTemplateList();
+        }}
+        
+        function toggleTemplateVisibility(id) {{
+            const template = templates.find(t => t.id === id);
+            if (template) {{
+                template.visible = !template.visible;
+                redraw();
+                updateTemplateList();
+                sendToStreamlit();
+            }}
+        }}
+        
+        function useSelectedTemplate() {{
+            if (selectedTemplate) {{
+                const templateData = {{
+                    action: 'use_template',
+                    template: selectedTemplate
+                }};
+                
+                window.parent.postMessage({{
+                    type: 'streamlit:componentValue',
+                    value: templateData
+                }}, '*');
+                
+                // Visual feedback
+                const btn = document.getElementById('useTemplateBtn');
+                const originalText = btn.textContent;
+                btn.textContent = 'Applied!';
+                btn.style.background = '#007bff';
+                setTimeout(() => {{
+                    btn.textContent = originalText;
+                    btn.style.background = '#28a745';
+                }}, 1000);
+            }}
+        }}
+        
+        function deleteSelectedTemplate() {{
+            if (selectedTemplate) {{
+                const index = templates.indexOf(selectedTemplate);
+                if (index > -1) {{
+                    templates.splice(index, 1);
+                    selectedTemplate = null;
+                    redraw();
+                    updateTemplateList();
+                    updateStatus();
+                    sendToStreamlit();
+                }}
+            }}
+        }}
+        
+        function saveTemplate() {{
+            sendToStreamlit();
+            // Visual feedback
+            const btn = document.getElementById('saveTemplateBtn');
+            const originalText = btn.textContent;
+            btn.textContent = 'Saved!';
+            btn.style.background = '#28a745';
+            setTimeout(() => {{
+                btn.textContent = originalText;
+                btn.style.background = 'rgba(255,255,255,0.2)';
+            }}, 1000);
+        }}
+        
+        function clearTemplates() {{
+            if (confirm('Clear all templates?')) {{
+                templates = [];
+                selectedTemplate = null;
+                redraw();
+                updateTemplateList();
+                updateStatus();
+                sendToStreamlit();
+            }}
+        }}
+        
+        function zoomBy(factor) {{
+            zoom *= factor;
+            zoom = Math.max(0.1, Math.min(5, zoom));
+            redraw();
+        }}
+        
+        function fitToView() {{
+            if (!backgroundImage) return;
+            
+            const scaleX = canvas.width / backgroundImage.width;
+            const scaleY = canvas.height / backgroundImage.height;
+            zoom = Math.min(scaleX, scaleY) * 0.9;
+            
+            panX = (canvas.width - backgroundImage.width * zoom) / 2;
+            panY = (canvas.height - backgroundImage.height * zoom) / 2;
+            
+            redraw();
+        }}
+        
+        function sendToStreamlit() {{
+            const data = {{
+                action: 'update_templates',
+                templates: templates
+            }};
+            
+            window.parent.postMessage({{
+                type: 'streamlit:componentValue',
+                value: data
+            }}, '*');
+        }}
+        
+        // Global functions for external access
+        window.selectTemplate = selectTemplate;
+        window.toggleTemplateVisibility = toggleTemplateVisibility;
+        
+        // Initialize
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', init);
+        }} else {{
+            init();
+        }}
+    }})();
+    </script>
+    """
     
-    # Show current zoom level
-    st.info(f"🔍 Current Zoom: {st.session_state.roi_zoom_level:.1f}x | Image Size: {w}×{h} px")
+    # Render the HTML component
+    component_value = components.html(html_content, height=600)
     
-    # Instructions
-    st.markdown("""
-    ### 📖 Instructions
-    
-    **Zoom Controls:**
-    - 🔍➕ Use Zoom In/Out buttons for quick zoom changes
-    - 🎚️ Use the slider for precise zoom control (0.5x - 3.0x)
-    - 🔄 Reset Zoom to return to original view
-    
-    **ROI Selection:**
-    - 🖱️ Click and drag to draw a rectangle around a template symbol
-    - 🎯 Select a clear, representative example of your target symbol
-    - ✨ The red rectangle shows your selection
-    - 🔄 Draw a new rectangle to replace the previous selection
-    - 📏 Optimal template size: 50x50 to 200x200 pixels
-    - 🔍 Use zoom to see small details clearly for precise selection
-    """)
+    # Handle component communication
+    if component_value:
+        handle_template_update(component_value)
 
 def render_sidebar():
     """Render sidebar with configuration options"""
@@ -528,8 +815,8 @@ def render_pdf_processing_tab():
         st.image(display_image, caption=f"Page {st.session_state.config['page']}", use_column_width=True)
 
 def render_roi_selection_tab():
-    """Render ROI selection tab"""
-    st.header("✂️ ROI Selection")
+    """Render template selection tab"""
+    st.header("✂️ Symbol Template Selection")
     
     if not st.session_state.pdf_loaded:
         st.warning("⚠️ Please upload and process a PDF first")
@@ -542,18 +829,33 @@ def render_roi_selection_tab():
     # Show current ROI if selected
     if st.session_state.roi_selected:
         roi = st.session_state.config['roi']
-        st.info(f"Current ROI: ({roi[0]}, {roi[1]}) - {roi[2]}×{roi[3]} px")
+        st.info(f"✅ Current Template ROI: ({roi[0]}, {roi[1]}) - {roi[2]}×{roi[3]} px")
     
     st.markdown("""
     **Instructions:**
-    1. Draw a rectangle around a clear, representative example of your target symbol
-    2. Select an area with minimal noise and overlapping elements
-    3. The template should contain 1-2 complete symbol instances
-    4. Avoid selecting areas with text or other symbols
+    1. 🖱️ Select the rectangle tool from the sidebar in the interface below
+    2. 🎯 Draw rectangles around clear examples of your target symbols
+    3. 📏 Templates should be 50-200 pixels in size for best results
+    4. ✅ Click "Use Selected" to apply a template as ROI for detection
     """)
     
-    # Interactive ROI selection using drawable canvas
+    # Native annotation interface
     render_interactive_roi_selection()
+    
+    # Show current templates
+    if st.session_state.annotations:
+        st.subheader("📋 Created Templates")
+        for template in st.session_state.annotations:
+            if template.get('type') == 'rectangle':
+                area = template['width'] * template['height']
+                if area < 400:
+                    quality = "⚠️ Small"
+                elif area > 40000:
+                    quality = "⚠️ Large" 
+                else:
+                    quality = "✅ Good"
+                st.write(f"**T{template['id']}**: {template['label']} - "
+                       f"({template['x']:.0f}, {template['y']:.0f}) {template['width']:.0f}×{template['height']:.0f}px - {quality}")
     
     st.markdown("---")
     
@@ -633,8 +935,8 @@ def main():
     initialize_session_state()
     
     # App title and description
-    st.title("🔍 Analytical Symbol Detection System")
-    st.markdown("Modern interface for floor plan symbol detection using template matching")
+    st.title("🔍 Enhanced Symbol Detection System")
+    st.markdown("Native annotation interface for floor plan symbol detection using template matching")
     st.markdown("---")
     
     # Sidebar
