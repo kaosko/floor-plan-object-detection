@@ -92,6 +92,7 @@ lightning_logs/
 wandb/
 mlruns/
 cometml/
+debug_tiles/
 
 # Large model/binary artifacts (adjust as needed)
 *.pt
