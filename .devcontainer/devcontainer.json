@@ -1,7 +1,30 @@
 {
-  "name": "Python 3",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bullseye",
+  // The original image was based on the one in comments below. However, it doesn't include gpu support 
+  // or at least on fedora --gpus all (for docker containers)
+  // is not supported anymore, so instead we rebuild from a nvidia cuda base image
+  // and set up cuda support by passing the arguments manually. This probably won't
+  // work for many different setups
+  // The whole point of running a devcontainer for me is that I can control dependencies.
+  // At the time of writing, I have Python 3.14 on the host and it failed for some esoteric reason
+  // so the cheapest way for me to retrain locally was using a devcontainer with downgraded dependencies, e.g. Pythong 3.11
+  // "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bullseye",
+  "name": "Python 3 with CUDA",
+  "image": "nvidia/cuda:12.4.1-base-ubuntu22.04",
+
+  // Manually pass NVIDIA GPU devices; do NOT use `--gpus all`
+  "runArgs": [
+    "--device=/dev/nvidiactl",
+    "--device=/dev/nvidia-uvm",
+    "--device=/dev/nvidia-uvm-tools",
+    "--device=/dev/nvidia0",
+    "--device=/dev/dri/card0",
+    "--device=/dev/dri/renderD129"
+  ],
+  "containerEnv": {
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DISABLE_REQUIRE": "1"
+  },
+
   "customizations": {
     "codespaces": {
       "openFiles": [
@@ -17,17 +40,27 @@
       ]
     }
   },
-  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
-  "postAttachCommand": {
-    "server": "streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false"
-  },
+
+  // Install Python, Git, OpenCV dependencies, and PyTorch with CUDA
+  "updateContentCommand": "apt-get update && apt-get install -y python3 python3-pip python3-venv git libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 && ln -sf /usr/bin/python3 /usr/bin/python && [ -f packages.txt ] && xargs apt-get install -y <packages.txt; [ -f requirements.txt ] && pip3 install -r requirements.txt; pip3 install streamlit; pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu124; echo '✅ Packages installed and Requirements met'",
+
+  // Don't auto-start streamlit - let user run commands manually
+  // To start streamlit: streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false
+  // To train: python3 train_gpu.py
+  "postAttachCommand": "echo '✅ Dev container ready! Run: python3 train_gpu.py'",
+
   "portsAttributes": {
     "8501": {
       "label": "Application",
       "onAutoForward": "openPreview"
     }
   },
+
   "forwardPorts": [
     8501
-  ]
+  ],
+
+  // Disable VS Code automatic GPU detection to avoid legacy runtime errors
+  "features": {},
+  "remoteUser": "root"
 }

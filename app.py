@@ -5,6 +5,7 @@ from PIL import Image, ImageDraw, ImageFont
 import helper
 import setting
 import numpy as np
+import cv2
 import math
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,9 @@ import threading
 import time
 import os
 import shutil
+
+# Import room detection modules
+from src.detection.room_detector import RoomDetector
 
 # Increase PIL's decompression bomb limit to support large floor plan images
 # Current image: 238,861,095 pixels, default limit: 178,956,970 pixels
@@ -167,6 +171,102 @@ def draw_annotations(image, filtered_boxes, model, label_font_size, show_confide
             draw.text((text_x, text_y), label, fill=(255, 255, 255))
 
     return annotated_image
+
+
+def detect_rooms(image):
+    """
+    Detect rooms/units in the floor plan image.
+    
+    Args:
+        image: PIL Image object
+        
+    Returns:
+        Tuple of (floorplan_contour, rooms) from RoomDetector
+    """
+    # Convert PIL Image to OpenCV format (numpy array)
+    img_array = np.array(image)
+    
+    # Convert RGB to BGR for OpenCV
+    if len(img_array.shape) == 3:
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    else:
+        img_cv = img_array
+    
+    # Initialize room detector with parameters suitable for floor plans
+    detector = RoomDetector(
+        min_room_area=3000,  # Minimum room area in pixels
+        min_floorplan_area=20000,  # Minimum floorplan boundary area
+        use_adaptive_threshold=True
+    )
+    
+    # Detect rooms
+    floorplan_contour, rooms = detector.detect(img_cv)
+    
+    return floorplan_contour, rooms
+
+
+def draw_room_overlays(image, rooms, alpha=0.3):
+    """
+    Draw semi-transparent colored overlays for detected rooms.
+    
+    Args:
+        image: PIL Image object
+        rooms: List of Room objects from RoomDetector
+        alpha: Transparency level (0.0 to 1.0)
+        
+    Returns:
+        PIL Image with room overlays
+    """
+    if not rooms:
+        return image
+    
+    # Convert PIL to numpy array
+    img_array = np.array(image)
+    
+    # Create overlay image
+    overlay = img_array.copy()
+    
+    # Color palette for rooms (semi-transparent, distinct colors)
+    room_colors = [
+        (255, 99, 71),    # Tomato
+        (60, 179, 113),   # Medium Sea Green
+        (65, 105, 225),   # Royal Blue
+        (255, 165, 0),    # Orange
+        (147, 112, 219),  # Medium Purple
+        (0, 206, 209),    # Dark Turquoise
+        (255, 182, 193),  # Light Pink
+        (144, 238, 144),  # Light Green
+        (135, 206, 250),  # Light Sky Blue
+        (255, 218, 185),  # Peach Puff
+        (221, 160, 221),  # Plum
+        (176, 224, 230),  # Powder Blue
+        (250, 128, 114),  # Salmon
+        (152, 251, 152),  # Pale Green
+        (173, 216, 230),  # Light Blue
+    ]
+    
+    for i, room in enumerate(rooms):
+        color = room_colors[i % len(room_colors)]
+        
+        # Get contour points
+        contour_points = room.contour.points
+        
+        # Fill the room contour with the color
+        cv2.fillPoly(overlay, [contour_points], color)
+    
+    # Blend the overlay with the original image
+    # Convert to float for proper blending
+    img_float = img_array.astype(float)
+    overlay_float = overlay.astype(float)
+    
+    # Alpha blend: result = (1 - alpha) * original + alpha * overlay
+    blended = (1 - alpha) * img_float + alpha * overlay_float
+    blended = blended.astype(np.uint8)
+    
+    # Convert back to PIL Image
+    result = Image.fromarray(blended)
+    
+    return result
 
 
 def create_tile_overlay_visualization(image, tile_size=640, overlap=64):
@@ -820,6 +920,10 @@ def main():
             st.session_state.detection_results = None
         if 'original_image' not in st.session_state:
             st.session_state.original_image = None
+        if 'detected_rooms' not in st.session_state:
+            st.session_state.detected_rooms = []
+        if 'floorplan_contour' not in st.session_state:
+            st.session_state.floorplan_contour = None
         if 'last_confidence' not in st.session_state:
             st.session_state.last_confidence = None
         if 'last_selected_labels' not in st.session_state:
@@ -861,7 +965,8 @@ def main():
             st.caption("Manual override - dynamic scaling disabled for current session")
 
         # Label selection for floor plan objects
-        available_labels = ['Column', 'Curtain Wall', 'Dimension', 'Door', 'Railing', 'Sliding Door', 'Stair Case', 'Wall', 'Window']
+        # Updated to match new YOLOv11 model classes (lowercase, includes 2door and furniture)
+        available_labels = ['2door', 'door', 'door1', 'door2', 'window', 'window1', 'window2', 'wall', 'stairs', 'bed', 'sofa1', 'sofa2', 'armchair', 'table1', 'table2', 'table3', 'sink1', 'sink2', 'sink3', 'sink4', 'tub']
         selected_labels = setting.select_labels(available_labels)
 
     # Creating main page heading
@@ -1041,8 +1146,18 @@ def main():
                     # Model-specific performance insights
                     st.sidebar.success("✨ Using standard YOLOv8: Optimized for floor plan elements")
             
+            # Run room detection
+            with st.spinner('🏠 Detecting rooms/units...'):
+                room_start_time = time.time()
+                floorplan_contour, detected_rooms = detect_rooms(uploaded_image)
+                room_inference_time = time.time() - room_start_time
+                st.sidebar.info(f"🏠 Room detection: {room_inference_time:.2f}s")
+                st.sidebar.info(f"📊 Rooms detected: {len(detected_rooms)}")
+            
             # Store detection results in session state
             st.session_state.detection_results = filtered_boxes
+            st.session_state.detected_rooms = detected_rooms
+            st.session_state.floorplan_contour = floorplan_contour
             st.session_state.last_confidence = confidence
             st.session_state.last_selected_labels = selected_labels.copy()
             st.session_state.last_iou_threshold = iou_threshold
@@ -1056,9 +1171,17 @@ def main():
 
     # Display results if we have detection data
     if st.session_state.detection_results is not None and st.session_state.original_image is not None:
-        # Draw annotations with current font size
+        # Start with the original image
+        result_image = st.session_state.original_image
+        
+        # Draw room overlays if rooms were detected
+        detected_rooms = getattr(st.session_state, 'detected_rooms', [])
+        if detected_rooms:
+            result_image = draw_room_overlays(result_image, detected_rooms, alpha=0.3)
+        
+        # Draw object detection annotations on top of room overlays
         annotated_image = draw_annotations(
-            st.session_state.original_image, 
+            result_image, 
             st.session_state.detection_results, 
             model, 
             label_font_size,
@@ -1072,12 +1195,24 @@ def main():
             st.image(annotated_image, caption='Detection Results', use_column_width=True)
             # Count detected objects and display counts
             object_counts = helper.count_detected_objects(model, st.session_state.detection_results)
+            
+            # Add room count to the object counts
+            detected_rooms = getattr(st.session_state, 'detected_rooms', [])
+            room_count = len(detected_rooms)
+            
             st.write("\n\nDetected Objects and their Counts:")
             for label, count in object_counts.items():
                 st.write(f"{label}: {count}")
+            
+            # Display room count
+            st.write(f"Room: {room_count}")
+
+            # Add room count to object_counts for CSV export
+            object_counts_with_rooms = object_counts.copy()
+            object_counts_with_rooms['Room'] = room_count
 
             # Generate and provide download link for CSV
-            csv_file = helper.generate_csv(object_counts)
+            csv_file = helper.generate_csv(object_counts_with_rooms)
             st.download_button(
                 label="Download CSV",
                 data=csv_file,
